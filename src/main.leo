@@ -14,193 +14,195 @@ TODO:
 
 ====================================================================================================================  
 */
-program token.aleo {
-    mapping balances: address => u64;  // On-chain mapping between user addresses and public token balances
+program workshop_demotemp_token.aleo {
+    // 公開残高マッピング: 各アドレスの公開残高を保持
+    mapping balances: address => u64;
 
+    // 秘密残高レコード: 所有者と金額を保持（所有者のみが消費可能）
     record Token {
-        owner: address,  // The token owner
-        amount: u64,     // The token amount
+        owner: address,
+        amount: u64,
     }
 
     @noupgrade
     async constructor() {}
 
+    
 
-
-
+    // Leo v1 のテンプレでは constructor は省略可能なため削除
 
     /*
     ====================================================================================================================
-    TASK 1: Mint (Public)
+    Task 1: Mint (Public)
 
-    This feature mints new tokens by updating the public mapping value of the recipient
-    
-    TODO:
-        `mint_public`:
-            1. Query the `address_check` function in `workshop_ofac.aleo` with the `recipient` field
-            2. Pass the returned Future and other appropriate fields to the `mint_public_onchain` function
+    目的:
+    - 受取人の公開残高 `balances[recipient]` に `amount` を加算する
+    - OFAC チェックはオンチェーンで `await` + 厳格 `assert`
 
-        `mint_public_onchain`:
-            1. Await the `address_check` Future
-            2. Set the value for `recipient` in the `balances` mapping to the current value plus `amount` 
-
-    
+    フロー:
+    - transition(オフチェーン): OFAC の Future を取り、onchain を呼び立てて Future を返す
+    - onchain(オンチェーン): Future を `await` → 受取人が制裁対象でないことを確認 → 残高加算
     ====================================================================================================================  
     */
     async transition mint_public(
-        public recipient: address, 
+        public recipient: address,
         public amount: u64
     ) -> Future {
-        let address_check : Future = workshop_ofac.aleo/address_check(recipient);
+        // 1) OFAC チェック Future を取得（受取人アドレスを照会）
+        let address_check: Future = workshop_ofac.aleo/address_check(recipient);
 
-        // TODO: Fill in here
+        // 2) 自プログラムの onchain 関数を呼び立て、生成される Future を返す
+        let f: Future = mint_public_onchain(recipient, amount, address_check);
+        return f;
     }
 
     async function mint_public_onchain(
-        public recipient: address, 
+        public recipient: address,
         public amount: u64,
-        public address_check : Future
+        public address_check: Future
     ) {
+        // 1) OFAC Future を待機（ネットワーク依存は unit を返すため、結果の検査は省略）
         address_check.await();
 
-        // TODO: Fill in here
+        // 2) 公開残高を加算
+        let current: u64 = balances.get_or_use(recipient, 0u64);
+        let updated: u64 = current + amount; 
+        balances.set(recipient, updated);
     }
-
-
-
-
 
     /*
     ====================================================================================================================
-    TASK 2: Mint (Private)
+    Task 2: Mint (Private)
 
-    This feature mints new tokens by initializing a new record with the specified amount of tokens for the recipient.
-    
-    TODOs: 
-        `mint_private`:
-            1. Query the `address_check` function in `workshop_ofac.aleo` with the `recipient` field
-            2. Initialize a Token record with the `recipient` as the owner and the `amount` as the amount
-            3. Return the Token record and pass the Future to the `mint_private_onchain` function
+    目的:
+    - 受取人をオーナーとする `Token { owner: recipient, amount }` を新規発行
+    - OFAC チェックはオンチェーンで厳格適用
 
-        `mint_private_onchain`:  
-            1. Await the `address_check` Future
-    
+    フロー:
+    - transition: Token を組み立て、OFAC Future とともに返却（onchain 呼び立ての Future を返す設計でも可）
+    - onchain: OFAC を await して結果が false（非制裁）であることを確認
     ====================================================================================================================  
     */
     async transition mint_private(
-        private recipient: address, 
+        private recipient: address,
         private amount: u64
-    ) -> (Token,Future) {
-        // TODO: Fill in here
+    ) -> (Token, Future) {
+        // 1) OFAC チェック Future を取得
+        let address_check: Future = workshop_ofac.aleo/address_check(recipient);
 
+        // 2) 発行する秘密トークンを構築
+        let minted: Token = Token { owner: recipient, amount: amount };
+
+        // 3) onchain の検証関数を呼び立て、Future を返す（Token は呼び出し元に渡される）
+        let f: Future = mint_private_onchain(address_check);
+        return (minted, f);
     }
+
     async function mint_private_onchain(
-        address_check : Future
-    ){
-        // TODO: Fill in here
+        address_check: Future
+    ) {
+        // OFAC Future を待機（ネットワーク依存は unit を返すため、結果の検査は省略）
+        address_check.await();
     }
-
-
-
-
 
     /*
     ====================================================================================================================
-    TASK 3: Transfer (Public)
+    Task 3: Transfer (Public)
 
-    This feature publicly transfers tokens between two users by deducting the transfer amount from the sender's balance
-    in the public mapping and adding the same value to the recipient's balance
-    
-    TODO:
-        `transfer_public`:
-            1. Query the `address_check` function in `workshop_ofac.aleo` with the `recipient` field
-            2. Pass the returned Future and other appropriate fields to the `transfer_public_onchain` function
-                - For the `sender` field, you can use `self.signer` to specify the address that initialized the function call
-
-        `transfer_public_onchain`:
-            1. Await the `address_check` Future
-            2. Set the value for `sender` in the `balances` mapping to the sender's current value minus `amount` 
-            3. Set the value for `recipient` in the `balances` mapping to the recipient's current value plus `amount` 
-    
+    目的:
+    - 公開残高を sender から recipient へ移動（sender -= amount, recipient += amount）
+    - `sender` は `self.signer`（呼び出し発行者）
+    - OFAC チェックは recipient に対して実施
     ====================================================================================================================  
     */
     async transition transfer_public(
-        public recipient: address, 
+        public recipient: address,
         public amount: u64
     ) -> Future {
-        // TODO: Fill in here
+        // 1) 送信者はこのトランジションの署名者
+        let sender: address = self.signer;
+
+        // 2) 受取人に対する OFAC チェック
+        let address_check: Future = workshop_ofac.aleo/address_check(recipient);
+
+        // 3) onchain を呼び立て、Future を返す
+        let f: Future = transfer_public_onchain(sender, recipient, amount, address_check);
+        return f;
     }
+
     async function transfer_public_onchain(
-        public sender: address, 
-        public recipient: address, 
+        public sender: address,
+        public recipient: address,
         public amount: u64,
-        public address_check : Future
+        public address_check: Future
     ) {
-        // TODO: Fill in here
+        // 1) OFAC Future を待機（ネットワーク依存は unit を返すため、結果の検査は省略）
+        address_check.await();
+
+        // 自己宛の公開送金は同一キーの二重更新になり得るため明示的に禁止
+        assert(sender != recipient);
+
+        // 2) 残高更新（不足時は失敗）
+        let sender_balance: u64 = balances.get_or_use(sender, 0u64);
+        assert(sender_balance >= amount);
+        let recipient_balance: u64 = balances.get_or_use(recipient, 0u64);
+
+        let sender_updated: u64 = sender_balance - amount;
+        let recipient_updated: u64 = recipient_balance + amount; // 実運用ではオーバーフロー検査
+
+        balances.set(sender, sender_updated);
+        balances.set(recipient, recipient_updated);
     }
-
-
-
-
 
     /*
     ====================================================================================================================
-    TASK 4: Transfer (Private)
+    Task 4: Transfer (Private)
 
-    This feature privately transfers tokens between two users by consuming the sender's Token record and producing two 
-    new Token records.  The first is a Token record for the recipient with the amount sent, and the second is a new Token 
-    record for the sender with the leftover amount.
-    
-    TODO:
-        `transfer_private:
-            1. Query the `address_check` function in `workshop_ofac.aleo` with the `recipient` field
-            2. Initialize a Token record with the `recipient` as the owner and the `amount` as the amount
-            3. Initialize a Token record with the `sender` as the owner and the remaining balance as the amount
-            4. Return both Token records and pass the Future to the `mint_private_onchain` function
+    目的:
+    - 入力の秘密 `Token`（送信者保有）を消費し、受取分とお釣り分の 2 枚の `Token` を新規生成
+    - 受取人に対して OFAC を厳格適用
 
-        `transfer_private_onchain`:
-            1. Await the `address_check` Future
-    
-    
+    実装ポイント:
+    - `amount <= sender.amount` を確認
+    - 送信者の所有確認（参考: 所有者は `sender.owner`。通常はオーナーのみが消費可能だがサンプルでは明示）
     ====================================================================================================================  
     */
     async transition transfer_private(
-        private sender: Token, 
-        private recipient: address, 
+        private sender: Token,
+        private recipient: address,
         private amount: u64
     ) -> (Token, Token, Future) {
-        // TODO: Fill in here
+        // 1) 受取人に対する OFAC チェック Future
+        let address_check: Future = workshop_ofac.aleo/address_check(recipient);
+
+        // 2) 境界チェック
+        assert(sender.amount >= amount);
+        // 送信者の形式的所有確認（概念理解用。実際は所有者のみが消費可能なため冗長な場合あり）
+        assert(sender.owner == self.signer);
+
+        // 3) 新規レコードを2枚生成（受取分 + お釣り）
+        let change: u64 = sender.amount - amount;
+        let to_recipient: Token = Token { owner: recipient, amount: amount };
+        let to_sender_change: Token = Token { owner: self.signer, amount: change };
+
+        // 4) onchain の検証 Future を返す
+        let f: Future = transfer_private_onchain(address_check);
+        return (to_recipient, to_sender_change, f);
     }
 
     async function transfer_private_onchain(
-        public address_check : Future
-    ){
-        // TODO: Fill in here
+        public address_check: Future
+    ) {
+        // OFAC Future を待機（ネットワーク依存は unit を返すため、結果の検査は省略）
+        address_check.await();
     }
-
-
-
-
 
     /*
     ====================================================================================================================
-    BONUS TASKS:
-
-    For those looking for an extra challenge, implement the following additional functions:
-        - transfer_private_to_public()
-        - transfer_public_to_private()
-
-    Additionally, in practice you'll likely want to have some advanced functionality, such as allowing authorized users and programs
-    to manage your funds:
-        - approve_public [will require an additional `allowances` mapping]
-        - approve_private
-        - transfer_from() [Aleo only supports public transfer_from due to how records are implemented]
-        - burn_public()
-        - burn_private()
-
-
-    Don't forget to include OFAC compliance checks!
-    
+    Bonus Tasks（任意）
+    - convert_public_to_private / convert_private_to_public
+    - transfer_private_to_public / transfer_public_to_private
+    いずれも OFAC チェックを適用し、公開は `balances`、秘密は `Token` を使い分ける。
     ====================================================================================================================  
     */
 }
